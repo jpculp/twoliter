@@ -8,5 +8,6 @@
 /build/rpms/*-debugsource-*.rpm
 !/build/tools/*
 **/target/*
+/certs
 /sbkeys
 /tests
