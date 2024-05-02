@@ -1,0 +1,12 @@
+/.git
+/.gomodcache
+/build/*
+!/build/images/*
+!/build/tools/*
+**/target/*
+/certs
+/packages
+/sources
+/sbkeys
+/tests
+/variants
