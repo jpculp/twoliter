@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2034,SC2154
+# shellcheck disable=SC2034,SC2154,SC2312
 
 # Store output artifacts in a versioned directory.
 OUTPUT_DIR="${OUTPUT_DIR}/${VERSION_ID}-${BUILD_ID}"
@@ -185,58 +185,12 @@ sbsetup() {
 
   # For signing the grub config, we need to embed the GPG public key in binary
   # form, which is similarly awkward to store in source control.
-  gpg --import "${SBKEYS}/config-sign.key"
+  gpg --batch --no-tty --import "${SBKEYS}/config-sign.key"
   if [ "${sb_key_source}" == "aws" ]; then
-    gpg --card-status
+    gpg --batch --no-tty --card-status
   fi
-  gpg --export >"${SBKEYS}/config-sign.pubkey"
-  gpg --list-keys
-}
-
-replace_vendor_certs() {
-  shims=(boot*.efi)
-  shim="${shims[0]}"
-  grubs=(grub*.efi)
-  grub="${grubs[0]}"
-  mokms=(mm*.efi)
-  mokm="${mokms[0]}"
-  if [ "${UEFI_SECURE_BOOT}" == "yes" ]; then
-    # Convert the vendor certificate to the expected format.
-    cert_table "${SBKEYS}/vendor.cer" "${SBKEYS}/vendor.obj"
-
-    # Replace the embedded vendor certificate, then sign shim with the db key.
-    objdumpcopy "${shim}" \
-      --update-section ".vendor_cert=${SBKEYS}/vendor.obj"
-    pesign -i "${shim}" -o "${shim}.signed" -s "${SHIM_SIGN_KEY[@]}"
-    mv "${shim}.signed" "${shim}"
-    pesigcheck -i "${shim}" -n 0 -c "${SBKEYS}/db.cer"
-
-    # Sign the MOK manager as well.
-    pesign -i "${mokm}" -o "${mokm}.signed" -s "${CODE_SIGN_KEY[@]}"
-    mv "${mokm}.signed" "${mokm}"
-    pesigcheck -i "${mokm}" -n 0 -c "${SBKEYS}/vendor.cer"
-
-    # Replace the embedded gpg public key, then sign grub with the vendor key.
-    objdumpcopy "${grub}" \
-      --file-alignment 4096 \
-      --update-section ".pubkey=${SBKEYS}/config-sign.pubkey"
-    pesign -i "${grub}" -o "${grub}.signed" -s "${CODE_SIGN_KEY[@]}"
-    mv "${grub}.signed" "${grub}"
-    pesigcheck -i "${grub}" -n 0 -c "${SBKEYS}/vendor.cer"
-  else
-    # Generate a zero-sized certificate in the expected format.
-    cert_table /dev/null "${SBKEYS}/vendor.obj"
-
-    # Replace the embedded vendor certificate with the zero-sized one, which shim
-    # will ignore when Secure Boot is disabled.
-    objdumpcopy "${shim}" \
-      --update-section ".vendor_cert=${SBKEYS}/vendor.obj"
-
-    # Remove the embedded gpg public key to disable GRUB's signature checks.
-    objdumpcopy "${grub}" \
-      --file-alignment 4096 \
-      --remove-section ".pubkey"
-  fi
+  gpg --batch --no-tty --export >"${SBKEYS}/config-sign.pubkey"
+  gpg --batch --no-tty --list-keys
 }
 
 veritysetup_format() {

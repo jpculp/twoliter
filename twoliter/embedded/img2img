@@ -1,3 +1,280 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034,SC2154,SC2249,SC2312
 
-echo "img2img not yet implemented" >&2 ; exit 1
+set -eux -o pipefail
+shopt -qs failglob
+
+UEFI_SECURE_BOOT="no"
+
+for opt in "$@"; do
+  optarg="$(expr "${opt}" : '[^=]*=\(.*\)')"
+  case "${opt}" in
+  --input-dir=*) INPUT_DIR="${optarg}" ;;
+  --input-img=*) INPUT_IMG="${optarg}" ;;
+  --output-dir=*) OUTPUT_DIR="${optarg}" ;;
+  --with-uefi-secure-boot=*) UEFI_SECURE_BOOT="${optarg}" ;;
+  esac
+done
+
+WORKDIR="$(mktemp -d)"
+OS_IMAGE_PATH="${INPUT_DIR}/${INPUT_IMG}"
+OS_IMAGE=$(basename "${OS_IMAGE_PATH}")
+
+cleanup() {
+  [ -n "${WORKDIR}" ] && rm -rf "${WORKDIR}"
+}
+trap 'cleanup' EXIT
+
+cp -p "${OS_IMAGE_PATH}" "${WORKDIR}"
+pushd "${WORKDIR}" >/dev/null
+
+# import the imager helper functions and variables
+# shellcheck source=imghelper
+. "${0%/*}/imghelper"
+
+if [[ "${OS_IMAGE}" == *.img.lz4 ]]; then
+  echo "Extracting ${OS_IMAGE}"
+  unlz4 -f "${OS_IMAGE}" "${OS_IMAGE%.*}"
+  OS_IMAGE="${OS_IMAGE%.*}"
+elif [[ "${OS_IMAGE}" == *.img ]]; then
+  echo "${OS_IMAGE} is already uncompressed"
+else
+  echo "${OS_IMAGE} not a supported format" >&2
+  exit 1
+fi
+
+# Store output artifacts in a versioned directory.
+mkdir -p "${OUTPUT_DIR}"
+
+# step 2: extract the root filesystem
+echo -e "Starting extract of root for ${OS_IMAGE}"
+ROOT_IMAGE="${WORKDIR}/root.ext4"
+ROOT_START="$(sgdisk --print "${OS_IMAGE}" | awk '/BOTTLEROCKET-ROOT-A/{ print $2 }')"
+echo "${ROOT_START}"
+ROOT_END="$(sgdisk --print "${OS_IMAGE}" | awk '/BOTTLEROCKET-ROOT-A/{ print $3 }')"
+echo "${ROOT_END}"
+ROOT_SIZE="$((ROOT_END - ROOT_START + 1))"
+dd if="${OS_IMAGE}" of="${ROOT_IMAGE}" count="${ROOT_SIZE}" skip="${ROOT_START}"
+echo "File exists at ${ROOT_IMAGE}"
+
+# step 3: replace artifacts
+ROOT_MOUNT="${WORKDIR}/root"
+mkdir -p "${ROOT_MOUNT}"
+
+# install CA certificates
+install_ca_certs
+
+mapfile -t new_root_artifacts <<<"$(find "${ROOT_MOUNT}" -type f)"
+if [[ -z "${new_root_artifacts[0]}" ]]; then
+  echo "Nothing to write, skipping..."
+else
+  for artifact in "${new_root_artifacts[@]}"; do
+    cat <<EOF | debugfs -w -f - "${ROOT_IMAGE}"
+rm ${artifact#"${ROOT_MOUNT}"}
+write ${artifact} ${artifact#"${ROOT_MOUNT}"}
+ea_set ${artifact#"${ROOT_MOUNT}"} security.selinux system_u:object_r:os_t:s0
+EOF
+  done
+fi
+
+# step 4: write the root filesystem back
+echo "Getting root image written back"
+OLD_ROOT_SIZE="$((${ROOT_SIZE} * 512))"
+NEW_ROOT_SIZE="$(stat --format='%s' "${ROOT_IMAGE}")"
+if [ "${NEW_ROOT_SIZE}" -gt "${OLD_ROOT_SIZE}" ]; then
+  echo "new root image size of ${NEW_ROOT_SIZE} bytes is greater than old size of ${OLD_ROOT_SIZE} bytes" >&2
+  exit 1
+fi
+dd if="${ROOT_IMAGE}" of="${OS_IMAGE}" conv=notrunc seek="${ROOT_START}"
+echo "Wrote files, recomputing verity"
+
+# step 5: regenerate the verity image
+VERITY_IMAGE="${WORKDIR}/verity.img"
+VERITY_START="$(sgdisk --print "${OS_IMAGE}" | awk '/BOTTLEROCKET-HASH-A/{ print $2 }')"
+VERITY_END="$(sgdisk --print "${OS_IMAGE}" | awk '/BOTTLEROCKET-HASH-A/{ print $3 }')"
+VERITY_SIZE="$((VERITY_END - VERITY_START + 1))"
+veritysetup_output="$(veritysetup_format "${ROOT_IMAGE}" "${VERITY_IMAGE}")"
+VERITY_DATA_4K_BLOCKS="$(grep '^Data blocks:' <<<"${veritysetup_output}" | awk '{ print $NF }')"
+VERITY_DATA_512B_BLOCKS="$((VERITY_DATA_4K_BLOCKS * 8))"
+VERITY_ROOT_HASH="$(grep '^Root hash:' <<<"${veritysetup_output}" | awk '{ print $NF }')"
+VERITY_SALT="$(grep '^Salt:' <<<"${veritysetup_output}" | awk '{ print $NF }')"
+OLD_VERITY_SIZE="$((VERITY_SIZE * 512))"
+NEW_VERITY_SIZE="$(stat --format='%s' "${VERITY_IMAGE}")"
+if [ "${NEW_VERITY_SIZE}" -gt "${OLD_VERITY_SIZE}" ]; then
+  echo "new hash image size of ${NEW_VERITY_SIZE} bytes is greater than old size of ${OLD_VERITY_SIZE} bytes" >&2
+  exit 1
+fi
+
+# step 6: write the hash image back
+dd if="${VERITY_IMAGE}" of="${OS_IMAGE}" conv=notrunc seek="${VERITY_START}"
+
+# step 7: extract the boot filesystem
+BOOT_IMAGE="${WORKDIR}/boot.ext4"
+BOOT_START="$(sgdisk --print "${OS_IMAGE}" | awk '/BOTTLEROCKET-BOOT-A/{ print $2 }')"
+BOOT_END="$(sgdisk --print "${OS_IMAGE}" | awk '/BOTTLEROCKET-BOOT-A/{ print $3 }')"
+BOOT_SIZE="$((BOOT_END - BOOT_START + 1))"
+dd if="${OS_IMAGE}" of="${BOOT_IMAGE}" count="${BOOT_SIZE}" skip="${BOOT_START}"
+BOOT_MOUNT="${WORKDIR}/boot"
+mkdir -p "${BOOT_MOUNT}"
+debugfs -R "rdump / ${BOOT_MOUNT}" "${BOOT_IMAGE}"
+
+# step 8: secure boot
+
+# Do the setup required for `pesign` and `gpg` signing and
+# verification to "just work" later on, regardless of which
+# type of signing profile we have.
+if [ "${UEFI_SECURE_BOOT}" == "yes" ] ; then
+  EFI_IMAGE="${WORKDIR}/efi.vfat"
+  EFI_START="$(sgdisk --print "${OS_IMAGE}" | awk '/EFI-SYSTEM/{ print $2 }')"
+  EFI_END="$(sgdisk --print "${OS_IMAGE}" | awk '/EFI-SYSTEM/{ print $3 }')"
+  EFI_SIZE="$(( EFI_END - EFI_START + 1))"
+  dd if="${OS_IMAGE}" of="${EFI_IMAGE}" count="${EFI_SIZE}" skip="${EFI_START}"
+  EFI_MOUNT="${WORKDIR}/efi"
+  mkdir -p "${EFI_MOUNT}/EFI/BOOT"
+  mcopy -i "${EFI_IMAGE}" -sv ::/EFI/BOOT "${EFI_MOUNT}/EFI/"
+  declare -a SHIM_SIGN_KEY
+  declare -a CODE_SIGN_KEY
+  sbsetup
+
+  # Remove the original signing certificate to avoid confusion.
+  rm "${EFI_MOUNT}/EFI/BOOT/db.cer" "${EFI_MOUNT}/EFI/BOOT/db.crt"
+
+  pushd "${EFI_MOUNT}/EFI/BOOT" >/dev/null
+
+  shims=(boot*.efi)
+  shim="${shims[0]}"
+  grubs=(grub*.efi)
+  grub="${grubs[0]}"
+  mokms=(mm*.efi)
+  mokm="${mokms[0]}"
+
+  # Convert the vendor certificate to the expected format.
+  cert_table "${SBKEYS}/vendor.cer" "${SBKEYS}/vendor.obj"
+
+  # Replace the embedded vendor certificate, then sign shim with the db key.
+  objdumpcopy "${shim}" \
+    --update-section ".vendor_cert=${SBKEYS}/vendor.obj"
+  pesign -i "${shim}" -o "${shim}.signed" -s "${SHIM_SIGN_KEY[@]}"
+  mv "${shim}.signed" "${shim}"
+  pesigcheck -i "${shim}" -n 0 -c "${SBKEYS}/db.cer"
+
+  # Sign the MOK manager as well.
+  pesign -i "${mokm}" -o "${mokm}.unsigned" -u 0 -r
+  pesign -i "${mokm}.unsigned" -o "${mokm}.signed" -s "${CODE_SIGN_KEY[@]}"
+  mv "${mokm}.signed" "${mokm}"
+  rm "${mokm}.unsigned"
+  pesigcheck -i "${mokm}" -n 0 -c "${SBKEYS}/vendor.cer"
+
+#  objdumpcopy "${grub}" \
+#    --file-alignment 4096 \
+#    --update-section ".pubkey=${SBKEYS}/config-sign.pubkey"
+  pesign -i "${grub}" -o "${grub}.unsigned" -u 0 -r
+  pesign -i "${grub}.unsigned" -o "${grub}.signed" -s "${CODE_SIGN_KEY[@]}"
+  mv "${grub}.signed" "${grub}"
+  rm "${grub}.unsigned"
+  pesigcheck -i "${grub}" -n 0 -c "${SBKEYS}/vendor.cer"
+
+  popd >/dev/null
+
+  mcopy -i "${EFI_IMAGE}" -ov "${EFI_MOUNT}/EFI/BOOT"/*.efi ::/EFI/BOOT
+  mcopy -i "${EFI_IMAGE}" -ov "${SBKEYS}"/db.{crt,cer} ::/EFI/BOOT
+  dd if="${EFI_IMAGE}" of="${OS_IMAGE}" conv=notrunc seek="${EFI_START}"
+
+  pushd "${BOOT_MOUNT}" >/dev/null
+
+  vmlinuz="vmlinuz"
+  pesign -i "${vmlinuz}" -o "${vmlinuz}.unsigned" -u 0 -r
+  pesign -i "${vmlinuz}.unsigned" -o "${vmlinuz}.signed" -s "${CODE_SIGN_KEY[@]}"
+  mv "${vmlinuz}.signed" "${vmlinuz}"
+  rm "${vmlinuz}.unsigned"
+  pesigcheck -i "${vmlinuz}" -n 0 -c "${SBKEYS}/vendor.cer"
+  cat <<EOF | debugfs -w -f - "${BOOT_IMAGE}"
+rm ${vmlinuz}
+write ${vmlinuz} ${vmlinuz}
+ea_set ${vmlinuz} security.selinux system_u:object_r:os_t:s0
+EOF
+
+  # Generate an HMAC for the kernel after signing.
+  openssl sha512 -hmac FIPS-FTW-RHT2009 -hex "${vmlinuz}" \
+    | awk -v vmlinuz="${vmlinuz}" '{ print $2 "  " vmlinuz }' \
+    > ".${vmlinuz}.hmac"
+  cat <<EOF | debugfs -w -f - "${BOOT_IMAGE}"
+rm .${vmlinuz}.hmac
+write .${vmlinuz}.hmac .${vmlinuz}.hmac
+ea_set .${vmlinuz}.hmac security.selinux system_u:object_r:os_t:s0
+EOF
+
+popd >/dev/null
+fi
+
+
+# step 9: modify grub.cfg
+DM_MOD_OPTS_PATTERN="[0-9]\+ verity ${VERITY_VERSION}"
+DM_MOD_OPTS="${VERITY_DATA_512B_BLOCKS} verity ${VERITY_VERSION}"
+
+VERITY_OPTS_PATTERN="[0-9]\+ [0-9]\+ [0-9]\+"
+VERITY_OPTS_PATTERN+=" 1 ${VERITY_HASH_ALGORITHM}"
+VERITY_OPTS_PATTERN+=" [0-9a-f]\+ [0-9a-f]\+"
+
+VERITY_OPTS="${VERITY_DATA_BLOCK_SIZE} ${VERITY_HASH_BLOCK_SIZE} ${VERITY_DATA_4K_BLOCKS}"
+VERITY_OPTS+=" 1 ${VERITY_HASH_ALGORITHM}"
+VERITY_OPTS+=" ${VERITY_ROOT_HASH} ${VERITY_SALT}"
+
+sed -i \
+  -e "s,\(.*\) ${DM_MOD_OPTS_PATTERN} \(.*\),\1 ${DM_MOD_OPTS} \2," \
+  -e "s,\(.*\) ${VERITY_OPTS_PATTERN} \(.*\),\1 ${VERITY_OPTS} \2," \
+  "${BOOT_MOUNT}/grub/grub.cfg"
+
+if [ "${UEFI_SECURE_BOOT}" == "yes" ]; then
+  rm -f "${BOOT_MOUNT}/grub/grub.cfg.sig"
+  gpg --batch --no-tty --detach-sign "${BOOT_MOUNT}/grub/grub.cfg"
+  gpg --batch --no-tty --verify "${BOOT_MOUNT}/grub/grub.cfg.sig" "${BOOT_MOUNT}/grub/grub.cfg"
+  cat <<EOF | debugfs -w -f - "${BOOT_IMAGE}"
+rm /grub/grub.cfg.sig
+write ${BOOT_MOUNT}/grub/grub.cfg.sig /grub/grub.cfg.sig
+ea_set /grub/grub.cfg.sig security.selinux system_u:object_r:os_t:s0
+EOF
+fi
+
+cat <<EOF | debugfs -w -f - "${BOOT_IMAGE}"
+rm /grub/grub.cfg
+write ${BOOT_MOUNT}/grub/grub.cfg /grub/grub.cfg
+ea_set /grub/grub.cfg security.selinux system_u:object_r:os_t:s0
+EOF
+
+OLD_BOOT_SIZE="$((BOOT_SIZE * 512))"
+NEW_BOOT_SIZE="$(stat --format='%s' "${BOOT_IMAGE}")"
+if [ "${NEW_BOOT_SIZE}" -gt "${OLD_BOOT_SIZE}" ]; then
+  echo "new boot image size of ${NEW_BOOT_SIZE} bytes is greater than old size of ${OLD_BOOT_SIZE} bytes" >&2
+  exit 1
+fi
+
+# step 10: write the boot filesystem back
+dd if="${BOOT_IMAGE}" of="${OS_IMAGE}" conv=notrunc seek="${BOOT_START}"
+
+# now that the images have been written byte for byte back, we can resize them before compressing
+resize2fs -M "${ROOT_IMAGE}"
+resize2fs -M "${BOOT_IMAGE}"
+
+# step 11: re compress the images and copy them to the outdir
+echo -e "Compressing and copying ${OS_IMAGE} back to ${OUTPUT_DIR}"
+mkdir -p "${OUTPUT_DIR}"
+
+lz4 -vc "${OS_IMAGE}" >"${OUTPUT_DIR}/${OS_IMAGE_NAME}.img.lz4"
+symlink_image "img.lz4" "os_image"
+symlink_image "img.lz4" "data_image"
+
+lz4 -9vc "${BOOT_IMAGE}" >"${OUTPUT_DIR}/${BOOT_IMAGE_NAME}"
+lz4 -9vc "${VERITY_IMAGE}" >"${OUTPUT_DIR}/${VERITY_IMAGE_NAME}"
+lz4 -9vc "${ROOT_IMAGE}" >"${OUTPUT_DIR}/${ROOT_IMAGE_NAME}"
+
+symlink_image "" "boot_image"
+symlink_image "" "verity_image"
+symlink_image "" "root_image"
+
+popd >/dev/null
+
+find "${OUTPUT_DIR}" -type f -print -exec chown 1000:1000 {} \;
+
+# Clean up temporary files to reduce size of layer.
+rm -rf /tmp/*

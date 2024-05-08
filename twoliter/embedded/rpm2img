@@ -244,7 +244,49 @@ if [ "${UEFI_SECURE_BOOT}" == "yes" ] ; then
 fi
 
 pushd "${EFI_MOUNT}/EFI/BOOT" >/dev/null
-replace_vendor_certs
+shims=(boot*.efi)
+shim="${shims[0]}"
+grubs=(grub*.efi)
+grub="${grubs[0]}"
+mokms=(mm*.efi)
+mokm="${mokms[0]}"
+if [ "${UEFI_SECURE_BOOT}" == "yes" ] ; then
+  # Convert the vendor certificate to the expected format.
+  cert_table "${SBKEYS}/vendor.cer" "${SBKEYS}/vendor.obj"
+
+  # Replace the embedded vendor certificate, then sign shim with the db key.
+  objdumpcopy "${shim}" \
+    --update-section ".vendor_cert=${SBKEYS}/vendor.obj"
+  pesign -i "${shim}" -o "${shim}.signed" -s "${SHIM_SIGN_KEY[@]}"
+  mv "${shim}.signed" "${shim}"
+  pesigcheck -i "${shim}" -n 0 -c "${SBKEYS}/db.cer"
+
+  # Sign the MOK manager as well.
+  pesign -i "${mokm}" -o "${mokm}.signed" -s "${CODE_SIGN_KEY[@]}"
+  mv "${mokm}.signed" "${mokm}"
+  pesigcheck -i "${mokm}" -n 0 -c "${SBKEYS}/vendor.cer"
+
+  # Replace the embedded gpg public key, then sign grub with the vendor key.
+  objdumpcopy "${grub}" \
+    --file-alignment 4096 \
+    --update-section ".pubkey=${SBKEYS}/config-sign.pubkey"
+  pesign -i "${grub}" -o "${grub}.signed" -s "${CODE_SIGN_KEY[@]}"
+  mv "${grub}.signed" "${grub}"
+  pesigcheck -i "${grub}" -n 0 -c "${SBKEYS}/vendor.cer"
+else
+  # Generate a zero-sized certificate in the expected format.
+  cert_table /dev/null "${SBKEYS}/vendor.obj"
+
+  # Replace the embedded vendor certificate with the zero-sized one, which shim
+  # will ignore when Secure Boot is disabled.
+  objdumpcopy "${shim}" \
+    --update-section ".vendor_cert=${SBKEYS}/vendor.obj"
+
+   # Remove the embedded gpg public key to disable GRUB's signature checks.
+   objdumpcopy "${grub}" \
+     --file-alignment 4096 \
+     --remove-section ".pubkey"
+fi
 popd >/dev/null
 
 dd if=/dev/zero of="${EFI_IMAGE}" bs=1M count="${partsize[EFI-A]}"
@@ -403,8 +445,10 @@ menuentry "${PRETTY_NAME} ${VERSION_ID}" --unrestricted {
 EOF
 
 if [ "${UEFI_SECURE_BOOT}" == "yes" ] ; then
-  gpg --detach-sign "${BOOT_MOUNT}/grub/grub.cfg"
-  gpg --verify "${BOOT_MOUNT}/grub/grub.cfg.sig"
+  #gpg --detach-sign "${BOOT_MOUNT}/grub/grub.cfg"
+  #gpg --verify "${BOOT_MOUNT}/grub/grub.cfg.sig"
+  gpg --batch --no-tty --detach-sign "${BOOT_MOUNT}/grub/grub.cfg"
+  gpg --batch --no-tty --verify "${BOOT_MOUNT}/grub/grub.cfg.sig" "${BOOT_MOUNT}/grub/grub.cfg"
 fi
 
 # Combine any bootconfig snippets in /boot for later use, then clean up.

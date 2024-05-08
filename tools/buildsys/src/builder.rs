@@ -204,9 +204,7 @@ impl VariantBuildArgs {
 
 struct VariantRepackArgs {
     image_features: HashSet<ImageFeature>,
-    image_format: String,
     name: String,
-    partition_plan: String,
     variant: String,
     variant_family: String,
     variant_flavor: String,
@@ -221,9 +219,7 @@ impl VariantRepackArgs {
         let mut args = Vec::new();
         args.push("--network".into());
         args.push("host".into());
-        args.build_arg("IMAGE_FORMAT", &self.image_format);
         args.build_arg("IMAGE_NAME", &self.name);
-        args.build_arg("PARTITION_PLAN", &self.partition_plan);
         args.build_arg("VARIANT", &self.variant);
         args.build_arg("VARIANT_FAMILY", &self.variant_family);
         args.build_arg("VARIANT_FLAVOR", &self.variant_flavor);
@@ -396,9 +392,6 @@ impl DockerBuild {
 
     /// Create a new `DockerBuild` that can repackage a variant image.
     pub(crate) fn repack_variant(args: RepackVariantArgs, manifest: &ManifestInfo) -> Result<Self> {
-        let image_layout = manifest.image_layout().cloned().unwrap_or_default();
-        let ImageLayout { partition_plan, .. } = image_layout;
-
         Ok(Self {
             dockerfile: args.common.tools_dir.join("repack.Dockerfile"),
             context: args.common.root_dir.clone(),
@@ -422,18 +415,7 @@ impl DockerBuild {
             ),
             target_build_args: TargetBuildArgs::Repack(VariantRepackArgs {
                 image_features: manifest.image_features().unwrap_or_default(),
-                image_format: match manifest.image_format() {
-                    Some(ImageFormat::Raw) | None => "raw",
-                    Some(ImageFormat::Qcow2) => "qcow2",
-                    Some(ImageFormat::Vmdk) => "vmdk",
-                }
-                .to_string(),
                 name: args.name,
-                partition_plan: match partition_plan {
-                    PartitionPlan::Split => "split",
-                    PartitionPlan::Unified => "unified",
-                }
-                .to_string(),
                 variant: args.variant,
                 variant_family: args.variant_family,
                 variant_flavor: args.variant_flavor,
