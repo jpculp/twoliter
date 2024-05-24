@@ -12,6 +12,7 @@ ARG VERSION_ID
 ARG BUILD_ID
 ARG NOCACHE
 ARG VARIANT
+ARG REPO
 ARG IMAGE_NAME
 ARG IMAGE_FORMAT
 ARG OS_IMAGE_SIZE_GIB
@@ -24,6 +25,7 @@ ENV VARIANT=${VARIANT} VERSION_ID=${VERSION_ID} BUILD_ID=${BUILD_ID}
 WORKDIR /root
 
 USER root
+COPY roles/${REPO}.root.json /root/roles/root.json
 RUN --mount=target=/host \
     --mount=type=secret,id=PK.crt,target=/root/sbkeys/PK.crt \
     --mount=type=secret,id=KEK.crt,target=/root/sbkeys/KEK.crt \

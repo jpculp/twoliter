@@ -1,4 +1,5 @@
 /
 !/build/images/*
+!/build/roles/*.root.json
 !/build/tools/*
 !/variants/*/template*.ovf

@@ -193,6 +193,9 @@ pub(crate) struct RepackVariantArgs {
     #[arg(long, env = "BUILDSYS_VERSION_IMAGE")]
     pub(crate) version_image: String,
 
+    #[arg(long, env = "PUBLISH_REPO")]
+    pub(crate) publish_repo: String,
+
     #[command(flatten)]
     pub(crate) common: Common,
 }

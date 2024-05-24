@@ -134,7 +134,12 @@ fi
 ###############################################################################
 # Section 3: replace needed artifacts
 
-# TODO - CA bundle code goes here
+# Prepare 'root.json'.
+ROOT_JSON_INSTALL_DIR="/usr/share/updog"
+install -d "${ROOT_MOUNT}${ROOT_JSON_INSTALL_DIR}"
+install -p -m 0644 \
+  "${HOME}/roles/root.json" \
+  "${ROOT_MOUNT}${ROOT_JSON_INSTALL_DIR}"
 
 ###############################################################################
 # Section 4: update root partition and root verity
