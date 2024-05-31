@@ -312,7 +312,10 @@ ROOT_LABELS=$(setfiles -n -d -F -m -r "${ROOT_MOUNT}" \
   awk -v root="${ROOT_MOUNT}" '{gsub(root"/","/"); gsub(root,"/"); print "ea_set", $1, "security.selinux", $4}')
 mkfs.ext4 -E "lazy_itable_init=0,stride=${ROOT_STRIDE},stripe_width=${ROOT_STRIPE_WIDTH}" \
   -O ^has_journal -b "${VERITY_DATA_BLOCK_SIZE}" -d "${ROOT_MOUNT}" "${ROOT_IMAGE}" "${partsize["ROOT-A"]}M"
-echo "${ROOT_LABELS}" | debugfs -w -f - "${ROOT_IMAGE}"
+ROOT_DEBUGFS_STDERR="$(mktemp -d)/root.err"
+echo "${ROOT_LABELS}" | debugfs -w -f - "${ROOT_IMAGE}" \
+  2>"${ROOT_DEBUGFS_STDERR}"
+check_debugfs_errors "${ROOT_DEBUGFS_STDERR}"
 resize2fs -M "${ROOT_IMAGE}"
 dd if="${ROOT_IMAGE}" of="${OS_IMAGE}" conv=notrunc bs=1M seek="${partoff["ROOT-A"]}"
 
@@ -410,7 +413,10 @@ BOOT_LABELS=$(setfiles -n -d -F -m -r "${BOOT_MOUNT}" \
   "${SELINUX_FILE_CONTEXTS}" "${BOOT_MOUNT}" |
   awk -v root="${BOOT_MOUNT}" '{gsub(root"/","/"); gsub(root,"/"); print "ea_set", $1, "security.selinux", $4}')
 mkfs.ext4 -O ^has_journal -d "${BOOT_MOUNT}" "${BOOT_IMAGE}" "${partsize["BOOT-A"]}M"
-echo "${BOOT_LABELS}" | debugfs -w -f - "${BOOT_IMAGE}"
+BOOT_DEBUGFS_STDERR="$(mktemp -d)/boot.err"
+echo "${BOOT_LABELS}" | debugfs -w -f - "${BOOT_IMAGE}" \
+  2>"${BOOT_DEBUGFS_STDERR}"
+check_debugfs_errors "${BOOT_DEBUGFS_STDERR}"
 resize2fs -M "${BOOT_IMAGE}"
 dd if="${BOOT_IMAGE}" of="${OS_IMAGE}" conv=notrunc bs=1M seek="${partoff["BOOT-A"]}"
 

@@ -246,6 +246,19 @@ install_root_json() {
   jq -e . "${root_mount}${root_json_install_dir}/root.json" >/dev/null
 }
 
+# Since debugfs doesn't pass return codes, extrapolate failures from STDERR.
+check_debugfs_errors() {
+  local stderr
+  stderr="$1"
+
+  # debugfs prints it's version info to STDERR, so we need to filter it out.
+  # shellcheck disable=SC2312  # grep returns an error code if no match.
+  if [[ "$(grep -vc '^debugfs ' "${stderr}")" -ne 0 ]]; then
+    grep -v '^debugfs ' "${stderr}" >&2
+    exit 1
+  fi
+}
+
 # shim expects the following data structure in `.vendor_cert`:
 #
 # struct {
