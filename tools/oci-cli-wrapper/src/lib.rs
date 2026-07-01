@@ -75,8 +75,27 @@ impl ImageTool {
     }
 
     /// Push a single-arch image in oci archive format
-    pub async fn push_oci_archive(&self, path: &Path, uri: &str) -> Result<()> {
-        self.image_tool_impl.push_oci_archive(path, uri).await
+    pub async fn push_oci_archive(
+        &self,
+        path: &Path,
+        uri: &str,
+        credentials: Option<&HashMap<&str, &str>>,
+    ) -> Result<()> {
+        self.image_tool_impl
+            .push_oci_archive(path, uri, credentials)
+            .await
+    }
+
+    /// Push an OCI layout directory to a registry
+    pub async fn push_oci_layout(
+        &self,
+        path: &Path,
+        uri: &str,
+        credentials: Option<&HashMap<&str, &str>>,
+    ) -> Result<()> {
+        self.image_tool_impl
+            .push_oci_layout(path, uri, credentials)
+            .await
     }
 
     /// Push the multi-arch kit manifest list
@@ -89,6 +108,7 @@ impl ImageTool {
             .push_multi_platform_manifest(platform_images, uri)
             .await
     }
+
 }
 
 #[async_trait]
@@ -100,7 +120,19 @@ pub trait ImageToolImpl: std::fmt::Debug + Send + Sync + 'static {
     /// Fetch the manifest
     async fn get_manifest(&self, uri: &str) -> Result<Vec<u8>>;
     /// Push a single-arch image in oci archive format
-    async fn push_oci_archive(&self, path: &Path, uri: &str) -> Result<()>;
+    async fn push_oci_archive(
+        &self,
+        path: &Path,
+        uri: &str,
+        credentials: Option<&HashMap<&str, &str>>,
+    ) -> Result<()>;
+    /// Push an OCI layout directory to a registry
+    async fn push_oci_layout(
+        &self,
+        path: &Path,
+        uri: &str,
+        credentials: Option<&HashMap<&str, &str>>,
+    ) -> Result<()>;
     /// Push the multi-arch kit manifest list
     async fn push_multi_platform_manifest(
         &self,

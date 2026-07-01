@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
@@ -43,6 +44,7 @@ impl ImageToolImpl for CraneCLI {
         self.cli
             .output(
                 &Self::crane_cmd(&["manifest", uri]),
+                &HashMap::new(),
                 format!("failed to fetch manifest for resource at {uri}"),
             )
             .await
@@ -53,6 +55,7 @@ impl ImageToolImpl for CraneCLI {
             .cli
             .output(
                 &Self::crane_cmd(&["config", uri]),
+                &HashMap::new(),
                 format!("failed to fetch image config from {uri}"),
             )
             .await?;
@@ -61,7 +64,12 @@ impl ImageToolImpl for CraneCLI {
         Ok(image_view.config)
     }
 
-    async fn push_oci_archive(&self, path: &Path, uri: &str) -> Result<()> {
+    async fn push_oci_archive(
+        &self,
+        path: &Path,
+        uri: &str,
+        credentials: Option<&HashMap<&str, &str>>,
+    ) -> Result<()> {
         let temp_dir = TempDir::new_in(path.parent().unwrap()).context(error::CraneTempSnafu)?;
 
         let mut oci_file = File::open(path).context(error::ArchiveReadSnafu)?;
@@ -70,12 +78,32 @@ impl ImageToolImpl for CraneCLI {
         oci_archive
             .unpack(temp_dir.path())
             .context(error::ArchiveExtractSnafu)?;
+        let layout_path = temp_dir.path().to_string_lossy().to_string();
         self.cli
-            .spawn(
-                &Self::crane_cmd(&["push", &temp_dir.path().to_string_lossy(), uri]),
+            .output(
+                &Self::crane_cmd(&["push", &layout_path, uri]),
+                credentials.unwrap_or(&HashMap::new()),
                 format!("failed to push image {uri}"),
             )
-            .await
+            .await?;
+        Ok(())
+    }
+
+    async fn push_oci_layout(
+        &self,
+        path: &Path,
+        uri: &str,
+        credentials: Option<&HashMap<&str, &str>>,
+    ) -> Result<()> {
+        let layout_path = path.to_string_lossy().to_string();
+        self.cli
+            .output(
+                &Self::crane_cmd(&["push", &layout_path, uri]),
+                credentials.unwrap_or(&HashMap::new()),
+                format!("failed to push image {uri}"),
+            )
+            .await?;
+        Ok(())
     }
 
     async fn push_multi_platform_manifest(
@@ -96,10 +124,13 @@ impl ImageToolImpl for CraneCLI {
         self.cli
             .output(
                 &Self::crane_cmd(&manifest_create_args),
+                &HashMap::new(),
                 format!("could not push multi-platform manifest to {uri}"),
             )
             .await?;
 
         Ok(())
     }
+
+
 }

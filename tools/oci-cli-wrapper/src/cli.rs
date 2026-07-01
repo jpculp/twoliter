@@ -1,4 +1,5 @@
 use snafu::{ensure, ResultExt};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::process::Command;
 
@@ -10,7 +11,12 @@ pub(crate) struct CommandLine {
 }
 
 impl CommandLine {
-    pub(crate) async fn output(&self, args: &[&str], error_msg: String) -> Result<Vec<u8>> {
+    pub(crate) async fn output(
+        &self,
+        args: &[&str],
+        env: &HashMap<&str, &str>,
+        error_msg: String,
+    ) -> Result<Vec<u8>> {
         let debug_cmd = [
             vec![format!("{}", self.path.display())],
             args.iter()
@@ -21,8 +27,12 @@ impl CommandLine {
         .join(", ");
 
         log::debug!("Executing [{debug_cmd}]",);
-        let output = Command::new(&self.path)
-            .args(args)
+        let mut cmd = Command::new(&self.path);
+        cmd.args(args);
+        for (key, val) in env {
+            cmd.env(key, val);
+        }
+        let output = cmd
             .output()
             .await
             .context(error::CommandFailedSnafu { message: error_msg })?;
