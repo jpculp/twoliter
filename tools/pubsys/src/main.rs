@@ -108,6 +108,9 @@ async fn main() -> Result<()> {
         SubCommands::PublishAmi(ref publish_args) => aws::publish_ami::run(&args, publish_args)
             .await
             .context(error::PublishAmiSnafu),
+        SubCommands::Ecr(ref ecr_args) => aws::ecr::run(&args, ecr_args)
+            .await
+            .context(error::EcrSnafu),
         SubCommands::Ssm(ref ssm_args) => aws::ssm::run(&args, ssm_args)
             .await
             .context(error::SsmSnafu),
@@ -161,6 +164,8 @@ enum SubCommands {
     PublishAmi(Box<aws::publish_ami::Who>),
     ValidateAmi(Box<aws::validate_ami::ValidateAmiArgs>),
 
+    Ecr(Box<aws::ecr::EcrArgs>),
+
     Ssm(Box<aws::ssm::SsmArgs>),
     PromoteSsm(Box<aws::promote_ssm::PromoteArgs>),
     ValidateSsm(Box<aws::validate_ssm::ValidateSsmArgs>),
@@ -202,6 +207,9 @@ mod error {
     pub(super) enum Error {
         #[snafu(display("Failed to build AMI: {}", source))]
         Ami { source: crate::aws::ami::Error },
+
+        #[snafu(display("Failed to publish ECR images: {}", source))]
+        Ecr { source: crate::aws::ecr::Error },
 
         #[snafu(display("Failed to fetch variant: {}", source))]
         FetchVariant {

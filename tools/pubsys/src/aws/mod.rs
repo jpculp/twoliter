@@ -5,6 +5,7 @@ use aws_sdk_ec2::types::ArchitectureValues;
 pub(crate) mod client;
 
 pub(crate) mod ami;
+pub(crate) mod ecr;
 pub(crate) mod promote_ssm;
 pub(crate) mod publish_ami;
 pub(crate) mod ssm;

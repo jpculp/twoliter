@@ -96,7 +96,7 @@ async fn publish_kit(
         );
 
         image_tool
-            .push_oci_archive(&path, &arch_specific_target_uri)
+            .push_oci_archive(&path, &arch_specific_target_uri, None)
             .await
             .context(error::PublishKitSnafu)?;
 
