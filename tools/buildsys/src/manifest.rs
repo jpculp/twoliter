@@ -61,6 +61,17 @@ of some upstream archive is "my-package.tar.gz", the output archive would be
 named `bundled-my-package.tar.gz`. This output path may then be referenced
 within an RPM spec or when creating a package in order to access the vendored
 upstream dependencies during build time.
+
+Any `Patch` declarations in the package's spec file are replayed onto the
+extracted upstream sources before dependencies are vendored, in ascending
+`PatchN` order and at the strip level given to `%autosetup`. This means a patch
+to `go.mod`, `go.sum`, `Cargo.toml`, or `Cargo.lock` is reflected in the
+vendored output, rather than producing a vendor directory that disagrees with
+the sources `%prep` later patches. Patches are applied in the top-level
+directory of the archive, which is what `%autosetup` treats them as relative
+to, even when `bundle-root-path` points at a nested module. Patches whose names
+buildsys cannot resolve to a file next to the spec -- for example because the
+spec names them through an unexpanded macro -- are skipped.
 ```ignore
 [[package.metadata.build-package.external-files]]
 path = "foo"

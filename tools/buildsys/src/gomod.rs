@@ -19,7 +19,7 @@ pub(crate) mod error {
     pub(crate) use crate::vendormod::error::*;
 }
 
-use crate::vendormod::{VendorMod, GO_CONFIG};
+use crate::vendormod::{Patches, VendorMod, GO_CONFIG};
 use buildsys::manifest;
 use error::Result;
 use filetime::FileTime;
@@ -32,9 +32,18 @@ impl GoMod {
         root_dir: &Path,
         package_dir: &Path,
         external_file: &manifest::ExternalFile,
+        patches: Patches<'_>,
         sdk: &str,
         mtime: FileTime,
     ) -> Result<()> {
-        VendorMod::vendor(&GO_CONFIG, root_dir, package_dir, external_file, sdk, mtime)
+        VendorMod::vendor(
+            &GO_CONFIG,
+            root_dir,
+            package_dir,
+            external_file,
+            patches,
+            sdk,
+            mtime,
+        )
     }
 }

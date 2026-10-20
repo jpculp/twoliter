@@ -50,6 +50,8 @@ const GO_SCRIPT_TMPL: &str = r#"#!/bin/bash
 
 set -e
 
+pkgdir="$(pwd)"
+
 toplevel=$(tar tf "__LOCAL_FILE_NAME__" | head -1)
 if [ -z "__MOD_DIR__" ] ; then
     targetdir="${toplevel}"
@@ -59,6 +61,9 @@ fi
 
 tar xf "__LOCAL_FILE_NAME__"
 
+# Replay the spec's patches onto the extracted sources before vendoring, so
+# that changes to go.mod or go.sum are reflected in the vendor directory.
+__PATCH_CMDS__
 pushd "${targetdir}"
     # Some upstreams ship a go.work (multi-module workspace); `go mod vendor`
     # refuses to run in workspace mode, so use `go work vendor` when a go.work
@@ -88,6 +93,8 @@ const RUST_SCRIPT_TMPL: &str = r#"#!/bin/bash
 
 set -e
 
+pkgdir="$(pwd)"
+
 toplevel=$(tar tf "__LOCAL_FILE_NAME__" | head -1)
 if [ -z "__MOD_DIR__" ] ; then
     targetdir="${toplevel}"
@@ -97,6 +104,10 @@ fi
 
 tar xf "__LOCAL_FILE_NAME__"
 
+# Replay the spec's patches onto the extracted sources before vendoring, so
+# that changes to Cargo.toml or Cargo.lock are reflected in the vendor
+# directory.
+__PATCH_CMDS__
 pushd "${targetdir}"
     mkdir -p .cargo
     cargo metadata --locked --format-version 1 >/dev/null && cargo vendor --locked > .cargo/config.toml
@@ -115,6 +126,14 @@ pub(crate) const RUST_CONFIG: VendorConfig = VendorConfig {
     cache_arg_name: "--cargo-home",
 };
 
+/// The patches an upstream archive should have applied to it before its
+/// dependencies are vendored, as declared by the package's RPM spec.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Patches<'a> {
+    pub files: &'a [PathBuf],
+    pub strip_level: u32,
+}
+
 pub(crate) struct VendorMod;
 
 impl VendorMod {
@@ -123,6 +142,7 @@ impl VendorMod {
         root_dir: &Path,
         package_dir: &Path,
         external_file: &manifest::ExternalFile,
+        patches: Patches<'_>,
         sdk: &str,
         mtime: FileTime,
     ) -> Result<()> {
@@ -166,7 +186,8 @@ impl VendorMod {
             .script_template
             .replace("__LOCAL_FILE_NAME__", &local_file_name.to_string_lossy())
             .replace("__MOD_DIR__", &mod_dir.to_string_lossy())
-            .replace("__OUTPUT__", &output_path_arg.to_string_lossy());
+            .replace("__OUTPUT__", &output_path_arg.to_string_lossy())
+            .replace("__PATCH_CMDS__", &patch_commands(package_dir, patches)?);
         let script_path = package_dir.join(config.script_name);
 
         // Drop the reference after writing the file to avoid a "text busy" error
@@ -198,6 +219,40 @@ impl VendorMod {
 
         res
     }
+}
+
+/// Renders the shell commands that replay `patches` onto the extracted sources.
+///
+/// Patches are applied in the top-level directory of the archive, which is what
+/// `%autosetup` treats them as relative to, rather than in the module directory
+/// which may be nested somewhere beneath it. The flags match the defaults
+/// `rpmbuild` applies patches with, so a patch that applies during `%prep` also
+/// applies here.
+fn patch_commands(package_dir: &Path, patches: Patches<'_>) -> Result<String> {
+    // Patches that are not next to the spec cannot be handed to the container,
+    // which only has the package directory mounted. `rpmbuild` would fail on
+    // these too, so there is nothing useful to do but leave them out.
+    let files: Vec<&PathBuf> = patches
+        .files
+        .iter()
+        .filter(|p| package_dir.join(p).is_file())
+        .collect();
+
+    if files.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut commands = String::from("pushd \"${toplevel%%/*}\"\n");
+    for file in files {
+        let name = file.to_str().context(error::InputFileSnafu)?;
+        commands.push_str(&format!(
+            "    patch -p{} --fuzz=0 --no-backup-if-mismatch -i \"${{pkgdir}}/{}\"\n",
+            patches.strip_level, name
+        ));
+    }
+    commands.push_str("popd\n");
+
+    Ok(commands)
 }
 
 fn extract_file_name(url: &str) -> Result<PathBuf> {
@@ -279,12 +334,70 @@ mod test {
         assert!(extract_file_name("not-a-url").is_err());
     }
 
+    /// Writes the named empty files into `dir` and returns their names, so that
+    /// they survive `patch_commands`' filesystem check.
+    fn touch_patches(dir: &Path, names: &[&str]) -> Vec<PathBuf> {
+        names
+            .iter()
+            .map(|name| {
+                fs::write(dir.join(name), "").unwrap();
+                PathBuf::from(name)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_patch_commands_empty_without_patches() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let commands = patch_commands(dir.path(), Patches::default()).unwrap();
+        assert_eq!(commands, "");
+    }
+
+    #[test]
+    fn test_patch_commands_preserve_order_and_strip_level() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let files = touch_patches(dir.path(), &["0001-one.patch", "0002-two.patch"]);
+        let commands = patch_commands(
+            dir.path(),
+            Patches {
+                files: &files,
+                strip_level: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            commands,
+            "pushd \"${toplevel%%/*}\"\n\
+             \x20   patch -p2 --fuzz=0 --no-backup-if-mismatch -i \"${pkgdir}/0001-one.patch\"\n\
+             \x20   patch -p2 --fuzz=0 --no-backup-if-mismatch -i \"${pkgdir}/0002-two.patch\"\n\
+             popd\n"
+        );
+    }
+
+    #[test]
+    fn test_patch_commands_skip_missing_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut files = touch_patches(dir.path(), &["0001-present.patch"]);
+        files.push(PathBuf::from("0002-absent.patch"));
+        let commands = patch_commands(
+            dir.path(),
+            Patches {
+                files: &files,
+                strip_level: 1,
+            },
+        )
+        .unwrap();
+        assert!(commands.contains("0001-present.patch"));
+        assert!(!commands.contains("0002-absent.patch"));
+    }
+
     #[test]
     fn test_go_script_template_substitution() {
         let script = GO_SCRIPT_TMPL
             .replace("__LOCAL_FILE_NAME__", "source-1.0.tar.gz")
             .replace("__MOD_DIR__", "")
-            .replace("__OUTPUT__", "bundled-source-1.0.tar.gz");
+            .replace("__OUTPUT__", "bundled-source-1.0.tar.gz")
+            .replace("__PATCH_CMDS__", "");
         assert!(script.contains("tar tf \"source-1.0.tar.gz\""));
         assert!(script.contains("tar xf \"source-1.0.tar.gz\""));
         assert!(script.contains("tar czf \"bundled-source-1.0.tar.gz\""));
@@ -298,7 +411,8 @@ mod test {
         let script = RUST_SCRIPT_TMPL
             .replace("__LOCAL_FILE_NAME__", "crate-2.0.tar.gz")
             .replace("__MOD_DIR__", "")
-            .replace("__OUTPUT__", "bundled-crate-2.0.tar.gz");
+            .replace("__OUTPUT__", "bundled-crate-2.0.tar.gz")
+            .replace("__PATCH_CMDS__", "");
         assert!(script.contains("tar tf \"crate-2.0.tar.gz\""));
         assert!(script.contains("tar xf \"crate-2.0.tar.gz\""));
         assert!(script.contains("tar czf \"bundled-crate-2.0.tar.gz\""));
@@ -311,8 +425,37 @@ mod test {
         let script = GO_SCRIPT_TMPL
             .replace("__LOCAL_FILE_NAME__", "source.tar.gz")
             .replace("__MOD_DIR__", "subdir/module")
-            .replace("__OUTPUT__", "bundled-source.tar.gz");
+            .replace("__OUTPUT__", "bundled-source.tar.gz")
+            .replace("__PATCH_CMDS__", "");
         assert!(script.contains("if [ -z \"subdir/module\" ]"));
+    }
+
+    /// Patches must land in the archive's top-level directory rather than in a
+    /// nested module directory, because that is what `%autosetup` would do.
+    #[test]
+    fn test_script_template_patches_archive_toplevel() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let files = touch_patches(dir.path(), &["0001-bump-dep.patch"]);
+        let patch_cmds = patch_commands(
+            dir.path(),
+            Patches {
+                files: &files,
+                strip_level: 1,
+            },
+        )
+        .unwrap();
+        let script = GO_SCRIPT_TMPL
+            .replace("__LOCAL_FILE_NAME__", "source.tar.gz")
+            .replace("__MOD_DIR__", "subdir/module")
+            .replace("__OUTPUT__", "bundled-source.tar.gz")
+            .replace("__PATCH_CMDS__", &patch_cmds);
+
+        let patch_at = script.find("patch -p1").unwrap();
+        let extract_at = script.find("tar xf").unwrap();
+        let vendor_at = script.find("go mod vendor").unwrap();
+        assert!(extract_at < patch_at, "patches must follow extraction");
+        assert!(patch_at < vendor_at, "patches must precede vendoring");
+        assert!(script.contains("pushd \"${toplevel%%/*}\""));
     }
 
     #[test]

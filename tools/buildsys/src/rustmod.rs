@@ -17,7 +17,7 @@ pub(crate) mod error {
     pub(crate) use crate::vendormod::error::*;
 }
 
-use crate::vendormod::{VendorMod, RUST_CONFIG};
+use crate::vendormod::{Patches, VendorMod, RUST_CONFIG};
 use buildsys::manifest;
 use error::Result;
 use filetime::FileTime;
@@ -30,6 +30,7 @@ impl RustMod {
         root_dir: &Path,
         package_dir: &Path,
         external_file: &manifest::ExternalFile,
+        patches: Patches<'_>,
         sdk: &str,
         mtime: FileTime,
     ) -> Result<()> {
@@ -38,6 +39,7 @@ impl RustMod {
             root_dir,
             package_dir,
             external_file,
+            patches,
             sdk,
             mtime,
         )

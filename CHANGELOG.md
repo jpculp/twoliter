@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+* Apply a package's spec patches to upstream sources before vendoring Go and Rust dependencies, so that patches to `go.mod`, `go.sum`, `Cargo.toml`, or `Cargo.lock` are reflected in the vendored archive
+
 [unreleased]: https://github.com/bottlerocket-os/twoliter/compare/v0.26.0...HEAD
 
 ## [0.26.0] - 2026-10-09

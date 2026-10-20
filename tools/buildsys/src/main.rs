@@ -37,6 +37,7 @@ use snafu::{ensure, ResultExt};
 use spec::SpecInfo;
 use std::path::{Path, PathBuf};
 use std::process;
+use vendormod::Patches;
 
 mod error {
     use snafu::Snafu;
@@ -154,6 +155,31 @@ fn build_package(args: BuildPackageArgs) -> Result<()> {
     // Check for a deprecated key and error if it is detected.
     ensure_package_is_not_variant_sensitive(&manifest, &manifest_path)?;
 
+    // Package developer can override name of package if desired, e.g. to name package with
+    // characters invalid in Cargo crate names
+    let package = manifest.info().package_name();
+    let spec = format!("{package}.spec");
+    println!("cargo:rerun-if-changed={spec}");
+
+    // The spec is parsed before any vendoring happens, because vendoring needs to replay the
+    // spec's patches onto the upstream sources first. Otherwise a patch to go.mod, go.sum,
+    // Cargo.toml, or Cargo.lock would never be reflected in the vendored dependencies, since
+    // `%prep` does not run until long after the vendored archive has been built.
+    let info = SpecInfo::new(PathBuf::from(&spec)).context(error::SpecParseSnafu)?;
+
+    for f in &info.sources {
+        println!("cargo:rerun-if-changed={}", f.display());
+    }
+
+    for f in &info.patches {
+        println!("cargo:rerun-if-changed={}", f.display());
+    }
+
+    let patches = Patches {
+        files: &info.patches,
+        strip_level: info.patch_strip_level,
+    };
+
     if let Some(files) = manifest.info().external_files() {
         // We need the modification time for any external files or bundled modules to be no later
         // than the manifest's modification time, to avoid triggering spurious rebuilds.
@@ -184,6 +210,7 @@ fn build_package(args: BuildPackageArgs) -> Result<()> {
                         &args.common.root_dir,
                         &args.common.cargo_manifest_dir,
                         f,
+                        patches,
                         &args.common.sdk_image,
                         mtime,
                     )
@@ -192,6 +219,7 @@ fn build_package(args: BuildPackageArgs) -> Result<()> {
                         &args.common.root_dir,
                         &args.common.cargo_manifest_dir,
                         f,
+                        patches,
                         &args.common.sdk_image,
                         mtime,
                     )
@@ -210,22 +238,6 @@ fn build_package(args: BuildPackageArgs) -> Result<()> {
         for f in info.files {
             println!("cargo:rerun-if-changed={}", f.display());
         }
-    }
-
-    // Package developer can override name of package if desired, e.g. to name package with
-    // characters invalid in Cargo crate names
-    let package = manifest.info().package_name();
-    let spec = format!("{package}.spec");
-    println!("cargo:rerun-if-changed={spec}");
-
-    let info = SpecInfo::new(PathBuf::from(&spec)).context(error::SpecParseSnafu)?;
-
-    for f in info.sources {
-        println!("cargo:rerun-if-changed={}", f.display());
-    }
-
-    for f in info.patches {
-        println!("cargo:rerun-if-changed={}", f.display());
     }
 
     if args.common.cicd_hack {
